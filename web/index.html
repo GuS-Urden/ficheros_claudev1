@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simulador V-30 / V-31 / V-15</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #9fc3e0; font-family: system-ui, sans-serif; }
+    #hud { position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,.6); color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 14px; line-height: 1.4; }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    <div id="status">Cargando…</div>
+    <div id="speed"></div>
+  </div>
+
+  <script type="module">
+    import * as THREE from "three";
+
+    // Por defecto carga data/roads.json (OSM). Con ?data=sample carga el tramo de prueba.
+    const DATA_FILE = new URLSearchParams(location.search).get("data") === "sample"
+      ? "../data/sample.json" : "../data/roads.json";
+
+    const LANE_W = 3.5;       // ancho de carril (m)
+    const LINE_W = 0.15;      // grosor de las marcas (m)
+    const DASH = 3, GAP = 6;  // discontinua: 3 m pintado, 6 m vacío
+    const statusEl = document.getElementById("status");
+    const speedEl = document.getElementById("speed");
+
+    // ---------- Escena ----------
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x9fc3e0);
+    scene.fog = new THREE.Fog(0x9fc3e0, 600, 3000);
+
+    const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 5000);
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x556655, 1.0));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+    sun.position.set(200, 400, 100);
+    scene.add(sun);
+
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(20000, 20000),
+      new THREE.MeshLambertMaterial({ color: 0x6b8f5a })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -0.05;
+    scene.add(ground);
+
+    // ---------- Geometría de carretera ----------
+    // Normal lateral en el plano XZ para el punto i de la polilínea
+    function normalAt(pts, i) {
+      const a = pts[Math.max(i - 1, 0)];
+      const b = pts[Math.min(i + 1, pts.length - 1)];
+      const dx = b[0] - a[0], dz = b[1] - a[1];
+      const len = Math.hypot(dx, dz) || 1;
+      return [-dz / len, dx / len];
+    }
+
+    // Añade a `out` una banda entre dos desplazamientos laterales (m) de la polilínea
+    function addRibbon(out, pts, off0, off1, y) {
+      for (let i = 0; i < pts.length - 1; i++) {
+        const [ax, az] = pts[i], [bx, bz] = pts[i + 1];
+        const [nax, naz] = normalAt(pts, i);
+        const [nbx, nbz] = normalAt(pts, i + 1);
+        const a0 = [ax + nax * off0, y, az + naz * off0];
+        const a1 = [ax + nax * off1, y, az + naz * off1];
+        const b0 = [bx + nbx * off0, y, bz + nbz * off0];
+        const b1 = [bx + nbx * off1, y, bz + nbz * off1];
+        out.push(...a0, ...a1, ...b1, ...a0, ...b1, ...b0);
+      }
+    }
+
+    // Remuestrea la polilínea cada `step` metros para poder trocearla
+    function resample(pts, step = 0.5) {
+      const out = [pts[0]];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const [ax, az] = pts[i], [bx, bz] = pts[i + 1];
+        const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / step));
+        for (let k = 1; k <= n; k++) {
+          const t = k / n;
+          out.push([ax + (bx - ax) * t, az + (bz - az) * t]);
+        }
+      }
+      return out;
+    }
+
+    // Devuelve tramos "pintados" de una línea discontinua
+    function dashed(pts, dash, gap) {
+      const r = resample(pts);
+      const period = dash + gap;
+      const runs = [];
+      let run = null, dist = 0;
+      for (let i = 0; i < r.length; i++) {
+        if (i > 0) dist += Math.hypot(r[i][0] - r[i - 1][0], r[i][1] - r[i - 1][1]);
+        const on = (dist % period) < dash;
+        if (on) {
+          if (!run) { run = []; if (i > 0) run.push(r[i - 1]); }
+          run.push(r[i]);
+        } else if (run) {
+          runs.push(run);
+          run = null;
+        }
+      }
+      if (run) runs.push(run);
+      return runs;
+    }
+
+    // ---------- Marcas viales ----------
+    // Reglas de aproximación: OSM no tiene las marcas fiables.
+    // Corrige aquí o con una tabla propia los tramos que no coincidan con la realidad.
+    function addMarkings(road, buckets) {
+      const pts = road.points;
+      const half = (road.lanes * LANE_W) / 2;
+
+      // Bordes de calzada: línea continua
+      addRibbon(buckets.white, pts, -half, -half + LINE_W, 0.03);
+      addRibbon(buckets.white, pts, half - LINE_W, half, 0.03);
+
+      // Separaciones entre carriles: discontinua; en doble sentido de 2+ carriles, la central es continua
+      for (let k = 1; k < road.lanes; k++) {
+        const off = -half + k * LANE_W;
+        const isCenter = !road.oneway && road.lanes % 2 === 0 && k === road.lanes / 2;
+        const runs = isCenter ? [pts] : dashed(pts, DASH, GAP);
+        for (const run of runs) {
+          addRibbon(buckets.white, run, off - LINE_W / 2, off + LINE_W / 2, 0.03);
+        }
+      }
+    }
+
+    // ---------- Barreras de hormigón ----------
+    const concreteGeo = new THREE.BoxGeometry(0.6, 0.8, 1);
+    const concreteMat = new THREE.MeshLambertMaterial({ color: 0xbdbdb8 });
+
+    function addBarrier(b) {
+      for (let i = 0; i < b.points.length - 1; i++) {
+        const [ax, az] = b.points[i], [bx, bz] = b.points[i + 1];
+        const len = Math.hypot(bx - ax, bz - az);
+        if (len < 0.1) continue;
+        const m = new THREE.Mesh(concreteGeo, concreteMat);
+        m.scale.z = len;
+        m.position.set((ax + bx) / 2, 0.4, (az + bz) / 2);
+        m.rotation.y = Math.atan2(bx - ax, bz - az);
+        scene.add(m);
+      }
+    }
+
+    // ---------- Construcción de la escena ----------
+    const mats = {
+      asphalt: new THREE.MeshLambertMaterial({ color: 0x3a3a3a, side: THREE.DoubleSide }),
+      white: new THREE.MeshBasicMaterial({ color: 0xf2f2f2, side: THREE.DoubleSide }),
+    };
+
+    function build(data) {
+      const buckets = { asphalt: [], white: [] };
+      for (const road of data.roads) {
+        const half = (road.lanes * LANE_W) / 2;
+        addRibbon(buckets.asphalt, road.points, -half, half, 0);
+        addMarkings(road, buckets);
+      }
+      for (const [name, arr] of Object.entries(buckets)) {
+        if (!arr.length) continue;
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.Float32BufferAttribute(arr, 3));
+        g.computeVertexNormals();
+        scene.add(new THREE.Mesh(g, mats[name]));
+      }
+      for (const b of data.barriers ?? []) addBarrier(b);
+    }
+
+    // ---------- Coche (física muy básica, sin colisiones todavía) ----------
+    const car = new THREE.Group();
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(1.8, 0.7, 4.2),
+      new THREE.MeshLambertMaterial({ color: 0xc62828 })
+    );
+    body.position.y = 0.6;
+    car.add(body);
+    scene.add(car);
+
+    const keys = {};
+    addEventListener("keydown", e => keys[e.code] = true);
+    addEventListener("keyup", e => keys[e.code] = false);
+
+    let speed = 0, heading = 0;
+    const MAX_SPEED = 35, ACCEL = 6, BRAKE = 12, COAST = 1.5; // m/s y m/s²
+
+    function update(dt) {
+      const gas = keys.KeyW || keys.ArrowUp;
+      const brake = keys.KeyS || keys.ArrowDown;
+      const left = keys.KeyA || keys.ArrowLeft;
+      const right = keys.KeyD || keys.ArrowRight;
+
+      if (gas) speed += ACCEL * dt;
+      if (brake) speed -= (speed > 0 ? BRAKE : ACCEL / 2) * dt;
+      if (!gas && !brake) speed -= Math.sign(speed) * Math.min(Math.abs(speed), COAST * dt);
+      speed = Math.max(-8, Math.min(MAX_SPEED, speed));
+
+      const steer = (left ? 1 : 0) - (right ? 1 : 0);
+      heading += steer * 0.9 * Math.min(1, Math.abs(speed) / 10) * Math.sign(speed) * dt;
+
+      car.position.x += Math.sin(heading) * speed * dt;
+      car.position.z += Math.cos(heading) * speed * dt;
+      car.rotation.y = heading;
+
+      // Cámara detrás del coche
+      const back = new THREE.Vector3(-Math.sin(heading), 0, -Math.cos(heading));
+      const desired = car.position.clone().addScaledVector(back, 9).add(new THREE.Vector3(0, 3.5, 0));
+      camera.position.lerp(desired, Math.min(1, dt * 6));
+      camera.lookAt(car.position.x, 1.2, car.position.z);
+
+      speedEl.textContent = `${Math.round(Math.abs(speed) * 3.6)} km/h · W/S acelerar-frenar · A/D dirección`;
+    }
+
+    // ---------- Arranque ----------
+    async function init() {
+      try {
+        const res = await fetch(DATA_FILE);
+        if (!res.ok) throw new Error(`${res.status} al leer ${DATA_FILE}`);
+        const data = await res.json();
+        build(data);
+
+        if (data.roads.length) {
+          const pts = data.roads[0].points;
+          const p0 = pts[0], p1 = pts[1] ?? pts[0];
+          car.position.set(p0[0], 0, p0[1]);
+          heading = Math.atan2(p1[0] - p0[0], p1[1] - p0[1]);
+        }
+        statusEl.textContent = `Cargado: ${data.roads.length} tramos, ${(data.barriers ?? []).length} barreras`;
+      } catch (err) {
+        statusEl.textContent = `Error: ${err.message}. Sirve la carpeta del proyecto con un servidor local (ver README).`;
+      }
+      requestAnimationFrame(loop);
+    }
+
+    let last = performance.now();
+    function loop(now) {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      update(dt);
+      renderer.render(scene, camera);
+      requestAnimationFrame(loop);
+    }
+
+    addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    init();
+  </script>
+</body>
+</html>
