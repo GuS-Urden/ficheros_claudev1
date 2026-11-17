@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Descarga de OpenStreetMap (Overpass API) para la V-30, V-31 y V-15.
+Descarga de OpenStreetMap (Overpass API) para la V-30, V-31 y V-15, ríos incluidos.
 
 Convierte lat/lon a metros locales (x = este, z = sur) alrededor de un origen
 y guarda el resultado en data/roads.json.
@@ -18,7 +18,7 @@ from pathlib import Path
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
-# Caja geográfica: sur, oeste, norte, este. Ajústala si quieres más área.
+# Caja geográfica: sur, oeste, norte, este. Debe coincidir con la de fetch_ortho.py
 BBOX = "39.35,-0.60,39.60,-0.20"
 
 # Origen de coordenadas locales (centro aproximado de la zona)
@@ -28,12 +28,12 @@ M_PER_DEG_LON = 111_320.0 * math.cos(math.radians(ORIGIN_LAT))
 
 BARRIER_TYPES = "jersey|concrete|wall|retaining_wall|guard_rail"
 
-# La regex sin anclar también recoge refs combinadas como "V-30;V-31"
 QUERY = f"""
 [out:json][timeout:120];
 (
   way["ref"~"V-(30|31|15)"]({BBOX});
   way["barrier"~"^({BARRIER_TYPES})$"]({BBOX});
+  way["waterway"~"^(river|canal)$"]({BBOX});
 );
 out geom tags;
 """
@@ -46,10 +46,23 @@ def to_local(lat, lon):
     return [round(x, 2), round(z, 2)]
 
 
+def bbox_dict():
+    south, west, north, east = (float(v) for v in BBOX.split(","))
+    return {"south": south, "west": west, "north": north, "east": east}
+
+
+def bounds_local():
+    b = bbox_dict()
+    corners = [to_local(la, lo) for la in (b["south"], b["north"]) for lo in (b["west"], b["east"])]
+    xs = [c[0] for c in corners]
+    zs = [c[1] for c in corners]
+    return [min(xs), min(zs), max(xs), max(zs)]
+
+
 def fetch_overpass():
     body = urllib.parse.urlencode({"data": QUERY}).encode()
     req = urllib.request.Request(
-        OVERPASS_URL, data=body, headers={"User-Agent": "simulador-valencia/0.1"}
+        OVERPASS_URL, data=body, headers={"User-Agent": "simulador-valencia/0.2"}
     )
     with urllib.request.urlopen(req, timeout=180) as resp:
         return json.load(resp)
@@ -63,7 +76,7 @@ def parse_lanes(tags):
 
 
 def convert(raw):
-    roads, barriers = [], []
+    roads, barriers, water = [], [], []
     for el in raw.get("elements", []):
         if el.get("type") != "way" or "geometry" not in el:
             continue
@@ -81,21 +94,21 @@ def convert(raw):
                 "lanes": parse_lanes(tags),
                 "oneway": tags.get("oneway") in ("yes", "true", "1"),
                 "maxspeed": tags.get("maxspeed", ""),
+                "layer": tags.get("layer", "0"),
+                "bridge": tags.get("bridge", "no"),
                 "points": points,
             })
         elif "barrier" in tags:
-            barriers.append({
-                "id": el["id"],
-                "type": tags["barrier"],
-                "points": points,
-            })
-    return roads, barriers
+            barriers.append({"id": el["id"], "type": tags["barrier"], "points": points})
+        elif "waterway" in tags:
+            water.append({"id": el["id"], "name": tags.get("name", ""), "points": points})
+    return roads, barriers, water
 
 
 def main():
     print("Consultando Overpass API…")
     raw = fetch_overpass()
-    roads, barriers = convert(raw)
+    roads, barriers, water = convert(raw)
 
     out = Path(__file__).resolve().parent.parent / "data" / "roads.json"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -103,14 +116,17 @@ def main():
         json.dumps(
             {
                 "origin": {"lat": ORIGIN_LAT, "lon": ORIGIN_LON},
+                "bbox": bbox_dict(),
+                "bounds": bounds_local(),
                 "roads": roads,
                 "barriers": barriers,
+                "water": water,
             },
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
-    print(f"{len(roads)} tramos de carretera y {len(barriers)} barreras -> {out}")
+    print(f"{len(roads)} tramos, {len(barriers)} barreras, {len(water)} cursos de agua -> {out}")
 
 
 if __name__ == "__main__":
