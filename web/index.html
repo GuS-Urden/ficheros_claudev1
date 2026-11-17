@@ -6,7 +6,8 @@
   <title>Simulador V-30 / V-31 / V-15</title>
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #9fc3e0; font-family: system-ui, sans-serif; }
-    #hud { position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,.6); color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 14px; line-height: 1.4; }
+    #hud { position: fixed; bottom: 10px; left: 10px; background: rgba(0,0,0,.6); color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 14px; line-height: 1.4; }
+    #minimap { position: fixed; top: 10px; width: 280px; height: 280px; border: 2px solid #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
   </style>
   <script type="importmap">
     { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
@@ -16,20 +17,42 @@
   <div id="hud">
     <div id="status">Cargando…</div>
     <div id="speed"></div>
+    <div id="help"></div>
   </div>
+  <canvas id="minimap"></canvas>
 
   <script type="module">
     import * as THREE from "three";
 
-    // Por defecto carga data/roads.json (OSM). Con ?data=sample carga el tramo de prueba.
-    const DATA_FILE = new URLSearchParams(location.search).get("data") === "sample"
-      ? "../data/sample.json" : "../data/roads.json";
+    // ---------- Configuración ----------
+    // ?data=sample        tramo sintético de prueba (sin terreno)
+    // ?vmax=230           velocidad máxima en km/h (por defecto 230)
+    // ?minimap=left       minimapa a la izquierda (por defecto a la derecha)
+    const params = new URLSearchParams(location.search);
+    const DATA_DIR = "../data/";
+    const SAMPLE = params.get("data") === "sample";
+    const DATA_FILE = SAMPLE ? DATA_DIR + "sample.json" : DATA_DIR + "roads.json";
+    const TERRAIN_FILE = DATA_DIR + "terrain.json";
+    const ORTHO_FILE = DATA_DIR + "ortho.jpg";
+    const VMAX_KMH = Number(params.get("vmax")) || 230;
+    const MAX_SPEED = VMAX_KMH / 3.6;          // m/s
+    const MM_SIDE = params.get("minimap") === "left" ? "left" : "right";
 
     const LANE_W = 3.5;       // ancho de carril (m)
     const LINE_W = 0.15;      // grosor de las marcas (m)
     const DASH = 3, GAP = 6;  // discontinua: 3 m pintado, 6 m vacío
+
+    // Parámetros de altura. Son heurísticas, ajustables.
+    const ROAD_LIFT = 0.1;          // la calzada queda justo encima del terreno
+    const BRIDGE_CLEARANCE_M = 5;   // TODO: altura del tablero sobre las orillas por nivel de "layer"; medir en campo o con más datos
+    const WATER_W = 25;             // TODO: usar la etiqueta width de OSM cuando exista
+    const WATER_LIFT = 0.15;        // el agua se apoya sobre el terreno (sin cauce tallado todavía)
+    const SNAP_M = 15;              // radio de búsqueda para la altura del coche sobre la calzada
+
     const statusEl = document.getElementById("status");
     const speedEl = document.getElementById("speed");
+    document.getElementById("help").textContent =
+      "W/S acelerar-frenar · A/D dirección · M mapa · N norte/rumbo · +/− zoom mapa";
 
     // ---------- Escena ----------
     const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -48,16 +71,63 @@
     sun.position.set(200, 400, 100);
     scene.add(sun);
 
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(20000, 20000),
-      new THREE.MeshLambertMaterial({ color: 0x6b8f5a })
-    );
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -0.05;
-    scene.add(ground);
+    // ---------- Terreno ----------
+    let terrain = null; // { bounds, step, nx, nz, heights }
+
+    // Altura del terreno en (x, z) por interpolación bilineal de la rejilla
+    function terrainAt(x, z) {
+      if (!terrain) return 0;
+      const [x0, z0] = terrain.bounds;
+      const fx = Math.min(terrain.nx - 1, Math.max(0, (x - x0) / terrain.step));
+      const fz = Math.min(terrain.nz - 1, Math.max(0, (z - z0) / terrain.step));
+      const i = Math.floor(fx), j = Math.floor(fz);
+      const i1 = Math.min(i + 1, terrain.nx - 1), j1 = Math.min(j + 1, terrain.nz - 1);
+      const tx = fx - i, tz = fz - j;
+      const H = terrain.heights, nx = terrain.nx;
+      const h00 = H[j * nx + i], h10 = H[j * nx + i1];
+      const h01 = H[j1 * nx + i], h11 = H[j1 * nx + i1];
+      return (h00 * (1 - tx) + h10 * tx) * (1 - tz) + (h01 * (1 - tx) + h11 * tx) * tz;
+    }
+
+    function buildTerrainMesh(t) {
+      const { nx, nz, step } = t;
+      const [x0, z0] = t.bounds;
+      const pos = new Float32Array(nx * nz * 3);
+      for (let j = 0; j < nz; j++) {
+        for (let i = 0; i < nx; i++) {
+          const k = (j * nx + i) * 3;
+          pos[k] = x0 + i * step;
+          pos[k + 1] = t.heights[j * nx + i];
+          pos[k + 2] = z0 + j * step;
+        }
+      }
+      const idx = [];
+      for (let j = 0; j < nz - 1; j++) {
+        for (let i = 0; i < nx - 1; i++) {
+          const a = j * nx + i, b = a + 1, c = a + nx, d = c + 1;
+          idx.push(a, c, b, b, c, d);
+        }
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      g.setIndex(idx);
+      g.computeVertexNormals();
+      scene.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: 0x6b8f5a, side: THREE.DoubleSide })));
+    }
+
+    // Sin terreno (tramo de prueba): suelo plano
+    function buildFlatGround() {
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(20000, 20000),
+        new THREE.MeshLambertMaterial({ color: 0x6b8f5a })
+      );
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = -0.05;
+      scene.add(ground);
+    }
 
     // ---------- Geometría de carretera ----------
-    // Normal lateral en el plano XZ para el punto i de la polilínea
+    // Las polilíneas son [x, z, y]: y es la altura. Las bandas se generan en el plano XZ.
     function normalAt(pts, i) {
       const a = pts[Math.max(i - 1, 0)];
       const b = pts[Math.min(i + 1, pts.length - 1)];
@@ -66,35 +136,30 @@
       return [-dz / len, dx / len];
     }
 
-    // Añade a `out` una banda entre dos desplazamientos laterales (m) de la polilínea
-    function addRibbon(out, pts, off0, off1, y) {
+    function addRibbon(out, pts, off0, off1, lift) {
       for (let i = 0; i < pts.length - 1; i++) {
-        const [ax, az] = pts[i], [bx, bz] = pts[i + 1];
-        const [nax, naz] = normalAt(pts, i);
-        const [nbx, nbz] = normalAt(pts, i + 1);
-        const a0 = [ax + nax * off0, y, az + naz * off0];
-        const a1 = [ax + nax * off1, y, az + naz * off1];
-        const b0 = [bx + nbx * off0, y, bz + nbz * off0];
-        const b1 = [bx + nbx * off1, y, bz + nbz * off1];
+        const a = pts[i], b = pts[i + 1];
+        const na = normalAt(pts, i), nb = normalAt(pts, i + 1);
+        const vert = (p, n, off) => [p[0] + n[0] * off, p[2] + lift, p[1] + n[1] * off];
+        const a0 = vert(a, na, off0), a1 = vert(a, na, off1);
+        const b0 = vert(b, nb, off0), b1 = vert(b, nb, off1);
         out.push(...a0, ...a1, ...b1, ...a0, ...b1, ...b0);
       }
     }
 
-    // Remuestrea la polilínea cada `step` metros para poder trocearla
     function resample(pts, step = 0.5) {
       const out = [pts[0]];
       for (let i = 0; i < pts.length - 1; i++) {
-        const [ax, az] = pts[i], [bx, bz] = pts[i + 1];
-        const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / step));
+        const a = pts[i], b = pts[i + 1];
+        const n = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / step));
         for (let k = 1; k <= n; k++) {
           const t = k / n;
-          out.push([ax + (bx - ax) * t, az + (bz - az) * t]);
+          out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]);
         }
       }
       return out;
     }
 
-    // Devuelve tramos "pintados" de una línea discontinua
     function dashed(pts, dash, gap) {
       const r = resample(pts);
       const period = dash + gap;
@@ -115,18 +180,36 @@
       return runs;
     }
 
-    // ---------- Marcas viales ----------
-    // Reglas de aproximación: OSM no tiene las marcas fiables.
-    // Corrige aquí o con una tabla propia los tramos que no coincidan con la realidad.
-    function addMarkings(road, buckets) {
-      const pts = road.points;
-      const half = (road.lanes * LANE_W) / 2;
+    // ---------- Alturas de la calzada ----------
+    function isBridge(road) {
+      return road.bridge && road.bridge !== "no";
+    }
 
-      // Bordes de calzada: línea continua
+    // Calzada normal: pegada al terreno. Puente: el tablero une las orillas
+    // (interpolación lineal por distancia) y se eleva según su nivel ("layer").
+    function roadHeights(road) {
+      const pts = road.points;
+      if (!isBridge(road)) return pts.map(p => terrainAt(p[0], p[1]) + ROAD_LIFT);
+
+      const layer = Math.max(1, Number(road.layer) || 1);
+      const deck = BRIDGE_CLEARANCE_M * layer;
+      const first = pts[0], last = pts[pts.length - 1];
+      const a = terrainAt(first[0], first[1]), b = terrainAt(last[0], last[1]);
+
+      const cum = [0];
+      for (let i = 1; i < pts.length; i++) {
+        cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+      }
+      const L = cum[cum.length - 1] || 1;
+      return cum.map(d => a + (b - a) * (d / L) + deck);
+    }
+
+    // ---------- Marcas viales (reglas aproximadas; OSM no las tiene fiables) ----------
+    function addMarkings(road, buckets) {
+      const pts = road.p3;
+      const half = (road.lanes * LANE_W) / 2;
       addRibbon(buckets.white, pts, -half, -half + LINE_W, 0.03);
       addRibbon(buckets.white, pts, half - LINE_W, half, 0.03);
-
-      // Separaciones entre carriles: discontinua; en doble sentido de 2+ carriles, la central es continua
       for (let k = 1; k < road.lanes; k++) {
         const off = -half + k * LANE_W;
         const isCenter = !road.oneway && road.lanes % 2 === 0 && k === road.lanes / 2;
@@ -138,6 +221,7 @@
     }
 
     // ---------- Barreras de hormigón ----------
+    // TODO: las barreras se colocan sobre el terreno, no sobre el tablero de los puentes.
     const concreteGeo = new THREE.BoxGeometry(0.6, 0.8, 1);
     const concreteMat = new THREE.MeshLambertMaterial({ color: 0xbdbdb8 });
 
@@ -146,27 +230,69 @@
         const [ax, az] = b.points[i], [bx, bz] = b.points[i + 1];
         const len = Math.hypot(bx - ax, bz - az);
         if (len < 0.1) continue;
+        const mx = (ax + bx) / 2, mz = (az + bz) / 2;
         const m = new THREE.Mesh(concreteGeo, concreteMat);
         m.scale.z = len;
-        m.position.set((ax + bx) / 2, 0.4, (az + bz) / 2);
+        m.position.set(mx, terrainAt(mx, mz) + 0.4, mz);
         m.rotation.y = Math.atan2(bx - ax, bz - az);
         scene.add(m);
       }
     }
 
-    // ---------- Construcción de la escena ----------
+    // ---------- Índice de alturas para el coche ----------
+    const CELL = 50;
+    const roadIndex = new Map();
+    function indexRoadPoints(p3) {
+      for (const [x, z, y] of p3) {
+        const key = `${Math.floor(x / CELL)},${Math.floor(z / CELL)}`;
+        if (!roadIndex.has(key)) roadIndex.set(key, []);
+        roadIndex.get(key).push([x, z, y]);
+      }
+    }
+
+    // Altura de calzada más cercana al coche. Si hay un puente encima, elige
+    // la altura más próxima a la actual para no saltar de un nivel a otro.
+    function roadHeightNear(x, z, yRef) {
+      const cx = Math.floor(x / CELL), cz = Math.floor(z / CELL);
+      let best = null, bestDy = Infinity;
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const list = roadIndex.get(`${cx + dx},${cz + dz}`);
+          if (!list) continue;
+          for (const [px, pz, py] of list) {
+            if (Math.hypot(px - x, pz - z) > SNAP_M) continue;
+            const dy = Math.abs(py - yRef);
+            if (dy < bestDy) { bestDy = dy; best = py; }
+          }
+        }
+      }
+      return best;
+    }
+
+    // ---------- Construcción ----------
     const mats = {
       asphalt: new THREE.MeshLambertMaterial({ color: 0x3a3a3a, side: THREE.DoubleSide }),
       white: new THREE.MeshBasicMaterial({ color: 0xf2f2f2, side: THREE.DoubleSide }),
+      water: new THREE.MeshBasicMaterial({ color: 0x2f7fc1, side: THREE.DoubleSide }),
     };
 
     function build(data) {
-      const buckets = { asphalt: [], white: [] };
+      const buckets = { asphalt: [], white: [], water: [] };
+
       for (const road of data.roads) {
+        const h = roadHeights(road);
+        road.p3 = road.points.map((p, i) => [p[0], p[1], h[i]]);
         const half = (road.lanes * LANE_W) / 2;
-        addRibbon(buckets.asphalt, road.points, -half, half, 0);
+        addRibbon(buckets.asphalt, road.p3, -half, half, 0);
         addMarkings(road, buckets);
+        indexRoadPoints(road.p3);
       }
+
+      for (const w of data.water ?? []) {
+        const p3 = w.points.map(p => [p[0], p[1], terrainAt(p[0], p[1]) + WATER_LIFT]);
+        addRibbon(buckets.water, p3, -WATER_W / 2, WATER_W / 2, 0);
+      }
+
       for (const [name, arr] of Object.entries(buckets)) {
         if (!arr.length) continue;
         const g = new THREE.BufferGeometry();
@@ -174,10 +300,11 @@
         g.computeVertexNormals();
         scene.add(new THREE.Mesh(g, mats[name]));
       }
+
       for (const b of data.barriers ?? []) addBarrier(b);
     }
 
-    // ---------- Coche (física muy básica, sin colisiones todavía) ----------
+    // ---------- Coche ----------
     const car = new THREE.Group();
     const body = new THREE.Mesh(
       new THREE.BoxGeometry(1.8, 0.7, 4.2),
@@ -188,11 +315,19 @@
     scene.add(car);
 
     const keys = {};
-    addEventListener("keydown", e => keys[e.code] = true);
+    let mmVisible = true, mmRotate = false, mmRange = 1200;
+
+    addEventListener("keydown", e => {
+      keys[e.code] = true;
+      if (e.code === "KeyM") mmVisible = !mmVisible;
+      if (e.code === "KeyN") mmRotate = !mmRotate;
+      if (e.code === "Equal" || e.code === "NumpadAdd") mmRange = Math.min(5000, mmRange * 1.25);
+      if (e.code === "Minus" || e.code === "NumpadSubtract") mmRange = Math.max(150, mmRange / 1.25);
+    });
     addEventListener("keyup", e => keys[e.code] = false);
 
     let speed = 0, heading = 0;
-    const MAX_SPEED = 35, ACCEL = 6, BRAKE = 12, COAST = 1.5; // m/s y m/s²
+    const ACCEL = 10, BRAKE = 12;
 
     function update(dt) {
       const gas = keys.KeyW || keys.ArrowUp;
@@ -200,42 +335,152 @@
       const left = keys.KeyA || keys.ArrowLeft;
       const right = keys.KeyD || keys.ArrowRight;
 
-      if (gas) speed += ACCEL * dt;
+      if (gas) speed += ACCEL * Math.max(0.05, 1 - speed / MAX_SPEED) * dt;
       if (brake) speed -= (speed > 0 ? BRAKE : ACCEL / 2) * dt;
-      if (!gas && !brake) speed -= Math.sign(speed) * Math.min(Math.abs(speed), COAST * dt);
+      if (!gas && !brake && speed !== 0) {
+        const coast = (0.3 + 0.005 * Math.abs(speed)) * dt;
+        speed -= Math.sign(speed) * Math.min(Math.abs(speed), coast);
+      }
       speed = Math.max(-8, Math.min(MAX_SPEED, speed));
 
       const steer = (left ? 1 : 0) - (right ? 1 : 0);
-      heading += steer * 0.9 * Math.min(1, Math.abs(speed) / 10) * Math.sign(speed) * dt;
+      const turnRate = 0.9 * Math.min(1, Math.abs(speed) / 10) / (1 + Math.abs(speed) / 50);
+      heading += steer * turnRate * Math.sign(speed) * dt;
 
       car.position.x += Math.sin(heading) * speed * dt;
       car.position.z += Math.cos(heading) * speed * dt;
+
+      // Altura: la de la calzada cercana (puente o suelo), o el terreno si no hay calzada
+      const ry = roadHeightNear(car.position.x, car.position.z, car.position.y);
+      car.position.y = ry ?? terrainAt(car.position.x, car.position.z);
       car.rotation.y = heading;
 
-      // Cámara detrás del coche
       const back = new THREE.Vector3(-Math.sin(heading), 0, -Math.cos(heading));
       const desired = car.position.clone().addScaledVector(back, 9).add(new THREE.Vector3(0, 3.5, 0));
       camera.position.lerp(desired, Math.min(1, dt * 6));
-      camera.lookAt(car.position.x, 1.2, car.position.z);
+      camera.lookAt(car.position.x, car.position.y + 1.2, car.position.z);
 
-      speedEl.textContent = `${Math.round(Math.abs(speed) * 3.6)} km/h · W/S acelerar-frenar · A/D dirección`;
+      speedEl.textContent = `${Math.round(Math.abs(speed) * 3.6)} km/h (máx. ${VMAX_KMH})`;
+    }
+
+    // ---------- Minimapa ----------
+    const mm = document.getElementById("minimap");
+    const mctx = mm.getContext("2d");
+    const MM_PX = 280, DPR = devicePixelRatio;
+    mm.width = MM_PX * DPR;
+    mm.height = MM_PX * DPR;
+    mm.style[MM_SIDE] = "10px";
+
+    const ortho = new Image();
+    let orthoOK = false;
+    ortho.onload = () => { orthoOK = true; };
+    ortho.src = ORTHO_FILE;
+
+    let mapRoads = [], mapWater = [], mapBarriers = [], bounds = null;
+
+    function strokePath(pts) {
+      mctx.beginPath();
+      pts.forEach(([x, z], i) => (i ? mctx.lineTo(x, z) : mctx.moveTo(x, z)));
+      mctx.stroke();
+    }
+
+    function drawMinimap() {
+      if (!mmVisible) { mm.style.display = "none"; return; }
+      mm.style.display = "block";
+
+      const c = MM_PX / 2;
+      const k = MM_PX / mmRange;
+      const px = w => w / k;
+      const h = car.rotation.y;
+
+      mctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      mctx.clearRect(0, 0, MM_PX, MM_PX);
+      mctx.fillStyle = "#1d2a1d";
+      mctx.fillRect(0, 0, MM_PX, MM_PX);
+
+      mctx.save();
+      mctx.translate(c, c);
+      if (mmRotate) mctx.rotate(h + Math.PI);
+      mctx.scale(k, k);
+      mctx.translate(-car.position.x, -car.position.z);
+      mctx.lineCap = "round";
+      mctx.lineJoin = "round";
+
+      if (orthoOK && bounds) {
+        mctx.drawImage(ortho, bounds[0], bounds[1], bounds[2] - bounds[0], bounds[3] - bounds[1]);
+      }
+      const alpha = orthoOK ? 0.6 : 1;
+
+      mctx.strokeStyle = "rgba(40,120,210,0.85)";
+      mctx.lineWidth = 25;
+      for (const w of mapWater) strokePath(w.points);
+
+      for (const r of mapRoads) {
+        mctx.strokeStyle = `rgba(70,70,70,${alpha})`;
+        mctx.lineWidth = r.lanes * LANE_W;
+        strokePath(r.points);
+      }
+      mctx.strokeStyle = "rgba(255,60,60,0.9)";
+      mctx.lineWidth = px(1.5);
+      for (const r of mapRoads) strokePath(r.points);
+
+      mctx.strokeStyle = "#e8e8e0";
+      mctx.lineWidth = px(3);
+      for (const b of mapBarriers) strokePath(b.points);
+
+      mctx.restore();
+
+      mctx.save();
+      mctx.translate(c, c);
+      mctx.rotate(mmRotate ? 0 : h + Math.PI);
+      mctx.fillStyle = "#ffdd00";
+      mctx.strokeStyle = "#000";
+      mctx.lineWidth = 1;
+      mctx.beginPath();
+      mctx.moveTo(0, -9); mctx.lineTo(6, 7); mctx.lineTo(0, 3); mctx.lineTo(-6, 7);
+      mctx.closePath();
+      mctx.fill();
+      mctx.stroke();
+      mctx.restore();
+
+      if (!mmRotate) {
+        mctx.fillStyle = "#fff";
+        mctx.font = "bold 12px system-ui";
+        mctx.fillText("N", c - 4, 14);
+      }
     }
 
     // ---------- Arranque ----------
+    async function fetchJSON(url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`${res.status} al leer ${url}`);
+      return res.json();
+    }
+
     async function init() {
       try {
-        const res = await fetch(DATA_FILE);
-        if (!res.ok) throw new Error(`${res.status} al leer ${DATA_FILE}`);
-        const data = await res.json();
+        const data = await fetchJSON(DATA_FILE);
+
+        // El terreno es opcional: sin él (o con el tramo de prueba) el suelo es plano
+        if (!SAMPLE) {
+          try { terrain = await fetchJSON(TERRAIN_FILE); } catch { terrain = null; }
+        }
+        if (terrain) buildTerrainMesh(terrain); else buildFlatGround();
+
         build(data);
+        mapRoads = data.roads;
+        mapWater = data.water ?? [];
+        mapBarriers = data.barriers ?? [];
+        bounds = data.bounds ?? null;
 
         if (data.roads.length) {
           const pts = data.roads[0].points;
           const p0 = pts[0], p1 = pts[1] ?? pts[0];
-          car.position.set(p0[0], 0, p0[1]);
+          car.position.set(p0[0], terrainAt(p0[0], p0[1]), p0[1]);
           heading = Math.atan2(p1[0] - p0[0], p1[1] - p0[1]);
         }
-        statusEl.textContent = `Cargado: ${data.roads.length} tramos, ${(data.barriers ?? []).length} barreras`;
+        const terrainMsg = terrain ? `terreno ${terrain.nx}×${terrain.nz}` : "terreno plano";
+        statusEl.textContent = `Cargado: ${data.roads.length} tramos, ${mapBarriers.length} barreras, ${mapWater.length} cursos de agua, ${terrainMsg}`;
       } catch (err) {
         statusEl.textContent = `Error: ${err.message}. Sirve la carpeta del proyecto con un servidor local (ver README).`;
       }
@@ -248,6 +493,7 @@
       last = now;
       update(dt);
       renderer.render(scene, camera);
+      drawMinimap();
       requestAnimationFrame(loop);
     }
 

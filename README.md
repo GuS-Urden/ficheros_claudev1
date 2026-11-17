@@ -25,17 +25,38 @@ simulador-valencia/
 
    Abre `http://localhost:8000/web/index.html?data=sample`.
 
-2. Descargar los datos reales de la V-30, V-31 y V-15:
+2. Descargar los datos reales de la V-30, V-31 y V-15 (carreteras, barreras y ríos):
 
    ```bash
    python3 scripts/fetch_osm.py
    ```
 
-   Después abre `http://localhost:8000/web/index.html`.
+3. Descargar el terreno (rejilla de elevaciones) para el suelo, los puentes y el cauce del Turia:
+
+   ```bash
+   python3 scripts/fetch_dem.py
+   ```
+
+   Usa la API de Open-Meteo (Copernicus DEM, ~90 m) con una rejilla de 250 m, así que tarda unos minutos. Los resultados se guardan en `data/terrain.json`. El `TODO` del script explica cómo pasar al MDT05 del IGN.
+
+4. Descargar la ortofoto PNOA para el minimapa (opcional, pero necesaria para ver el satélite):
+
+   ```bash
+   python3 scripts/fetch_ortho.py
+   ```
+
+   Después abre `http://localhost:8000/web/index.html`. Si la descarga falla, comprueba el endpoint WMS del PNOA en ign.es y ajusta `WMS_URL` en el script.
 
 El visor necesita un servidor local porque el navegador no permite cargar JSON con `fetch` desde `file://`.
 
-**Controles:** W/↑ acelerar, S/↓ frenar o marcha atrás, A/← y D/→ dirección.
+**Parámetros de URL:**
+- `?vmax=230`: velocidad máxima en km/h (por defecto 230).
+- `?minimap=left`: minimapa a la izquierda (por defecto a la derecha).
+- `?data=sample`: tramo de prueba.
+
+**Controles:** W/↑ acelerar, S/↓ frenar o marcha atrás, A/← y D/→ dirección. En el minimapa, M lo oculta o muestra, N alterna entre norte arriba y rumbo arriba, y +/− cambian el zoom.
+
+**Minimapa:** muestra la ortofoto de fondo, las calzadas con su anchura real, las barreras, los ríos de OSM y una línea roja con el trazado de OSM para comparar con la imagen. Si no existe `data/ortho.jpg`, muestra solo el trazado vectorial.
 
 ## Qué hace y qué no hace todavía
 
