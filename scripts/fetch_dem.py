@@ -48,9 +48,11 @@ def fetch_batch(points):
                 return json.load(resp)["elevation"]
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
-                # Espera larga: el límite se recupera por minutos
                 retry_after = exc.headers.get("Retry-After")
-                wait = int(retry_after) if retry_after and retry_after.isdigit() else 60 * (attempt + 1)
+                wait = int(retry_after) if retry_after and retry_after.isdigit() else 60
+                if wait > 900:
+                    print(f"  límite de peticiones agotado: la API pide esperar {wait // 3600} h.")
+                    return None
             else:
                 wait = 10 * (attempt + 1)
             print(f"  error HTTP {exc.code}; espero {wait} s")
