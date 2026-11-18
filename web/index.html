@@ -49,7 +49,7 @@
     const WATER_LIFT = 0.15;        // el agua se apoya sobre el terreno (sin cauce tallado todavía)
     const SNAP_M = 15;              // radio de búsqueda para la altura del coche sobre la calzada
 
-    const RAMP_M = 40;        // longitud de la rampa de acceso al puente (m); constante para probar otros valores
+    const MAX_GRADE = 0.04;   // pendiente máxima de las rampas de acceso a puentes (4 %); probar 0.05 o 0.06 si hace falta
 
     const statusEl = document.getElementById("status");
     const speedEl = document.getElementById("speed");
@@ -256,8 +256,11 @@
       const layer = Math.max(1, Number(road.layer) || 1);
       const bankLevel = Math.max(ground[0], ground[ground.length - 1]);
       const deck = bankLevel + BRIDGE_CLEARANCE_M * layer;
+      // Longitud de cada rampa según la pendiente máxima: desnivel / pendiente
+      const rampStart = Math.max(1, (deck - ground[0]) / MAX_GRADE);
+      const rampEnd = Math.max(1, (deck - ground[ground.length - 1]) / MAX_GRADE);
       return cum.map((d, i) => {
-        const t = Math.min(smoothstep(d / RAMP_M), smoothstep((L - d) / RAMP_M));
+        const t = Math.min(smoothstep(d / rampStart), smoothstep((L - d) / rampEnd));
         return ground[i] + (deck - ground[i]) * t;
       });
     }
