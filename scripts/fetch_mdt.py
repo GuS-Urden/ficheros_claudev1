@@ -84,14 +84,17 @@ def grid_tiles(bb, tile_m):
 
 
 def corridor_tiles(features, tile_m):
-    """Teselas que tocan calzadas o agua, más un margen de CORRIDOR_M."""
-    margin = math.ceil(CORRIDOR_M / tile_m)
+    """Teselas que tocan calzadas o agua. Un vecino se añade solo si el punto
+    está a menos de CORRIDOR_M metros de su borde."""
     keys = set()
     for feat in features:
         for e, n in polyline_utm(feat["points"]):
             ix, iy = math.floor(e / tile_m), math.floor(n / tile_m)
-            for dx in range(-margin, margin + 1):
-                for dy in range(-margin, margin + 1):
+            fx, fy = e - ix * tile_m, n - iy * tile_m
+            dxs = [0] + ([-1] if fx < CORRIDOR_M else []) + ([1] if fx > tile_m - CORRIDOR_M else [])
+            dys = [0] + ([-1] if fy < CORRIDOR_M else []) + ([1] if fy > tile_m - CORRIDOR_M else [])
+            for dx in dxs:
+                for dy in dys:
                     keys.add(((ix + dx) * tile_m, (iy + dy) * tile_m))
     return keys
 
@@ -193,6 +196,7 @@ def main():
     plan = [("base", k) for k in sorted(base)] + [("detail", k) for k in sorted(detail)]
     pending = [(lv, k) for lv, k in plan if f"{lv}_{k[0]}_{k[1]}.f32" not in done]
     print(f"Teselas: base {len(base)}, detalle {len(detail)}. Pendientes: {len(pending)} de {len(plan)}")
+    OUT.mkdir(parents=True, exist_ok=True)
 
     for level, (x0, y0) in pending:
         cfg = LEVELS[level]
