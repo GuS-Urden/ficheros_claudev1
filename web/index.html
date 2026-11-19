@@ -38,6 +38,7 @@
     const MAX_SPEED = VMAX_KMH / 3.6;          // m/s
     const MM_SIDE = params.get("minimap") === "left" ? "left" : "right";
     const FOG_ON = params.get("fog") !== "0";   // ?fog=0 desactiva la niebla (diagnóstico)
+    const USE_MDT = params.get("mdt") !== "0";  // ?mdt=0 usa suelo plano (diagnóstico y pruebas rápidas)
 
     const LANE_W = 3.5;       // ancho de carril (m)
     const LINE_W = 0.15;      // grosor de las marcas (m)
@@ -634,7 +635,7 @@
         if (data.origin) projErr = setupProjection(data.origin);
 
         // Terreno MDT05 por teselas. Sin él (o con el tramo de prueba), suelo plano.
-        if (!SAMPLE) {
+        if (!SAMPLE && USE_MDT) {
           try {
             mdtIndex = await fetchJSON(MDT_INDEX);
             mdt = await loadMDT(mdtIndex);
