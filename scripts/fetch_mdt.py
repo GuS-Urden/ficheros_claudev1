@@ -4,7 +4,7 @@ Descarga el MDT05 del IGN por teselas (API de coberturas, EPSG:25830) en binario
 
 Dos niveles:
   base:   paso 25 m, teselas de 5 km, cubren el área de data/roads.json
-  detail: paso 5 m, teselas de 1 km, solo donde hay calzadas o agua (+ margen)
+  detail: paso 5 m, teselas de 250 m, solo donde hay calzadas o agua (+ 50 m de margen)
 
 Salida:
   data/mdt/index.json            índice de teselas (con el formato de cada una)
@@ -16,6 +16,7 @@ Uso (raíz del proyecto):  python scripts/fetch_mdt.py
 """
 import array
 import json
+from collections import deque
 import math
 import sys
 import time
@@ -33,9 +34,9 @@ OUT = ROOT / "data" / "mdt"
 
 LEVELS = {
     "base": {"collection": "EL.ElevationGridCoverage_25830_25_PB", "tile_m": 5000, "step_m": 25},
-    "detail": {"collection": "EL.ElevationGridCoverage_25830_5_PB", "tile_m": 1000, "step_m": 5},
+    "detail": {"collection": "EL.ElevationGridCoverage_25830_5_PB", "tile_m": 250, "step_m": 5},
 }
-CORRIDOR_M = 300        # margen alrededor de calzadas y agua para el nivel detail
+CORRIDOR_M = 50         # margen alrededor de calzadas y agua para el nivel detail
 SAMPLE_EVERY_M = 50     # muestreo de trazados para detectar las teselas que tocan
 BBOX_PAD_M = 1000       # margen extra alrededor del área base
 PAUSE_S = 1.0
@@ -186,6 +187,13 @@ def save_index(index):
     (OUT / "index.json").write_text(json.dumps(index, indent=1), encoding="utf-8")
 
 
+def fmt_time(seconds):
+    seconds = int(round(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}h {m:02d}m {sec:02d}s" if h else f"{m}m {sec:02d}s"
+
+
 def main():
     roads = json.loads((ROOT / "data" / "roads.json").read_text(encoding="utf-8"))
     index = load_index()
@@ -198,14 +206,22 @@ def main():
     print(f"Teselas: base {len(base)}, detalle {len(detail)}. Pendientes: {len(pending)} de {len(plan)}")
     OUT.mkdir(parents=True, exist_ok=True)
 
-    for level, (x0, y0) in pending:
+    total = len(plan)
+    done_before = total - len(pending)
+    durations = deque(maxlen=20)   # duración de las últimas teselas, para el tiempo estimado
+    t_start = time.time()
+
+    for n, (level, (x0, y0)) in enumerate(pending, start=1):
         cfg = LEVELS[level]
         fname = f"{level}_{x0}_{y0}.f32"
-        print(f"[{level}] x0={x0} y0={y0}")
+        t_tile = time.time()
+
         data = fetch_tile(cfg["collection"], x0, y0, cfg["tile_m"])
         if data is None:
             save_index(index)
-            raise SystemExit("Progreso guardado. Vuelve a ejecutar el script más tarde.")
+            raise SystemExit(
+                f"Progreso guardado ({done_before + n - 1}/{total}). Vuelve a ejecutar el script más tarde."
+            )
 
         nx, ny, flat = parse_tile(data)
         grid, nulls = fill_nulls(flat, nx, ny)
@@ -216,8 +232,18 @@ def main():
                                "step_m": cfg["step_m"], "nx": nx, "ny": ny,
                                "file": fname, "nulls_filled": nulls})
         save_index(index)
-        print(f"  guardada {fname}, nulos rellenados: {nulls}")
         time.sleep(PAUSE_S)
+
+        durations.append(time.time() - t_tile)
+        done = done_before + n
+        remaining = len(pending) - n
+        elapsed = time.time() - t_start
+        if len(durations) < 3:
+            eta = "calculando…"
+        else:
+            eta = "~" + fmt_time(sum(durations) / len(durations) * remaining)
+        print(f"[{done}/{total}] {100 * done / total:5.1f}% | {level:6s} {fname} | "
+              f"nulos {nulls} | transcurrido {fmt_time(elapsed)} | restante {eta}")
 
     print(f"Completado: {len(index['tiles'])} teselas en {OUT}")
 
