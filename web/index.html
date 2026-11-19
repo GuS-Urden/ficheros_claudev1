@@ -148,8 +148,8 @@
 
     // Altura dentro de una tesela: mismo reparto en triángulos que la malla
     function sampleTile(t, e, n) {
-      const fx = (e - t.x0) / t.step;
-      const fz = (t.y0 + t.tile_m - n) / t.step;   // fila 0 = norte
+      const fx = (e - t.x0) / t.step_m;
+      const fz = (t.y0 + t.tile_m - n) / t.step_m;  // fila 0 = norte
       const nx = t.nx, H = t.h;
       const i = Math.min(nx - 2, Math.max(0, Math.floor(fx)));
       const j = Math.min(t.ny - 2, Math.max(0, Math.floor(fz)));
@@ -175,7 +175,8 @@
     // Malla de una tesela con faldones. `skip(e, n)` omite celdas (se usa en la base
     // dentro de las zonas de detalle, para no solapar superficies).
     function buildTileMesh(t, skip) {
-      const { nx, ny, step, x0, y0, tile_m, h } = t;
+      const { nx, ny, x0, y0, tile_m, h } = t;
+      const step = t.step_m;
       const top = y0 + tile_m;
       const pos = [];
       for (let j = 0; j < ny; j++) {
