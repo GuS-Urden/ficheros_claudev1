@@ -16,6 +16,8 @@ Datos de OpenStreetMap: © colaboradores de OpenStreetMap, licencia ODbL.
 """
 import json
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -23,7 +25,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utm30n import latlon_to_utm30n  # noqa: E402
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Servidores Overpass. Si uno devuelve 502/503/504 o 429, el script prueba el siguiente.
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
+MAX_ROUNDS = 3   # vueltas completas a la lista de servidores
 
 # Caja geográfica: sur, oeste, norte, este
 BBOX = "39.35,-0.60,39.60,-0.20"
@@ -75,12 +82,30 @@ def bounds_local(ub):
 
 
 def fetch_overpass():
+    """Consulta Overpass probando varios servidores y reintentando con espera creciente."""
     body = urllib.parse.urlencode({"data": QUERY}).encode()
-    req = urllib.request.Request(
-        OVERPASS_URL, data=body, headers={"User-Agent": "simulador-valencia/0.5"}
-    )
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        return json.load(resp)
+    last_error = None
+    for round_no in range(1, MAX_ROUNDS + 1):
+        for url in OVERPASS_URLS:
+            req = urllib.request.Request(
+                url, data=body, headers={"User-Agent": "simulador-valencia/0.5"}
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=180) as resp:
+                    return json.load(resp)
+            except urllib.error.HTTPError as exc:
+                last_error = f"HTTP {exc.code} en {url}"
+                if exc.code not in (429, 502, 503, 504):
+                    raise
+            except (urllib.error.URLError, TimeoutError) as exc:
+                last_error = f"{exc} en {url}"
+            print(f"  {last_error}; pruebo el siguiente servidor")
+        if round_no < MAX_ROUNDS:
+            wait = 30 * round_no
+            print(f"  ningún servidor respondió; espero {wait} s (vuelta {round_no + 1}/{MAX_ROUNDS})")
+            time.sleep(wait)
+    raise SystemExit(f"Overpass no respondió tras {MAX_ROUNDS} vueltas (último error: {last_error}). "
+                     "Vuelve a ejecutar el script en unos minutos.")
 
 
 def parse_lanes(tags):
