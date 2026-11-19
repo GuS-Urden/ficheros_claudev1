@@ -79,59 +79,21 @@
     sun.position.set(200, 400, 100);
     scene.add(sun);
 
-    // ---------- Proyección: local (equirectangular) <-> UTM 30N ----------
-    // Transformación afín ajustada en el origen. Es exacta en el origen y se aleja
-    // unos metros en los bordes del área; el error se muestra en la barra de estado.
-    let PROJ = null;
+    // ---------- Marco de coordenadas: UTM 30N (EPSG:25830) ----------
+    // Local: x = E - E0 (este), z = -(N - N0) (sur positivo). Es una traslación,
+    // así que el terreno, las calzadas y la ortofoto coinciden sin aproximaciones.
+    let UTM_E0 = 0, UTM_N0 = 0;
 
-    // Lat/lon WGS84 -> UTM 30N (EPSG:25830), fórmulas de Krüger. Igual que scripts/utm30n.py
-    function latlonToUtm30(lat, lon) {
-      const a = 6378137, f = 1 / 298.257223563;
-      const e2 = f * (2 - f), ep2 = e2 / (1 - e2), k0 = 0.9996;
-      const lon0 = -3 * Math.PI / 180;
-      const phi = lat * Math.PI / 180, lam = lon * Math.PI / 180;
-      const N = a / Math.sqrt(1 - e2 * Math.sin(phi) ** 2);
-      const T = Math.tan(phi) ** 2, C = ep2 * Math.cos(phi) ** 2;
-      const A = Math.cos(phi) * (lam - lon0);
-      const M = a * (
-        (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256) * phi
-        - (3 * e2 / 8 + 3 * e2 ** 2 / 32 + 45 * e2 ** 3 / 1024) * Math.sin(2 * phi)
-        + (15 * e2 ** 2 / 256 + 45 * e2 ** 3 / 1024) * Math.sin(4 * phi)
-        - (35 * e2 ** 3 / 3072) * Math.sin(6 * phi)
-      );
-      const x = k0 * N * (A + (1 - T + C) * A ** 3 / 6
-        + (5 - 18 * T + T * T + 72 * C - 58 * ep2) * A ** 5 / 120) + 500000;
-      const y = k0 * (M + N * Math.tan(phi) * (A * A / 2
-        + (5 - T + 9 * C + 4 * C * C) * A ** 4 / 24
-        + (61 - 58 * T + T * T + 600 * C - 330 * ep2) * A ** 6 / 720));
-      return [x, y];
-    }
-
-    // Ajusta la afín a partir del origen de roads.json. Devuelve el error en metros
-    // en las esquinas de un área de ±17 km.
-    function setupProjection(origin) {
-      const LAT0 = origin.lat, LON0 = origin.lon;
-      const M_LAT = 111320, M_LON = 111320 * Math.cos(LAT0 * Math.PI / 180);
-      const exact = (x, z) => latlonToUtm30(LAT0 - z / M_LAT, LON0 + x / M_LON);
-      const O = exact(0, 0), Ex = exact(10000, 0), Ez = exact(0, 10000);
-      const a11 = (Ex[0] - O[0]) / 1e4, a21 = (Ex[1] - O[1]) / 1e4;
-      const a12 = (Ez[0] - O[0]) / 1e4, a22 = (Ez[1] - O[1]) / 1e4;
-      PROJ = { O, a11, a12, a21, a22, det: a11 * a22 - a12 * a21 };
-
-      const [ea, na] = utmOf(-17000, 17000);
-      const [ee, ne] = exact(-17000, 17000);
-      return Math.hypot(ea - ee, na - ne);
+    function setupFrame(utmOrigin) {
+      [UTM_E0, UTM_N0] = utmOrigin;
     }
 
     function utmOf(x, z) {
-      const P = PROJ;
-      return [P.O[0] + P.a11 * x + P.a12 * z, P.O[1] + P.a21 * x + P.a22 * z];
+      return [UTM_E0 + x, UTM_N0 - z];
     }
 
     function localOf(e, n) {
-      const P = PROJ;
-      const du = e - P.O[0], dn = n - P.O[1];
-      return [(P.a22 * du - P.a12 * dn) / P.det, (-P.a21 * du + P.a11 * dn) / P.det];
+      return [e - UTM_E0, UTM_N0 - n];
     }
 
     // ---------- Terreno MDT05 por teselas ----------
@@ -671,8 +633,10 @@
       try {
         const data = await fetchJSON(DATA_FILE);
 
-        let projErr = 0;
-        if (data.origin) projErr = setupProjection(data.origin);
+        if (!data.utm_origin && !SAMPLE) {
+          throw new Error("roads.json es de una versión anterior: ejecuta fetch_osm.py de nuevo");
+        }
+        setupFrame(data.utm_origin ?? [0, 0]);
 
         // Terreno MDT05 por teselas. Sin él (o con el tramo de prueba), suelo plano.
         if (!SAMPLE && USE_MDT) {
@@ -699,7 +663,7 @@
         }
 
         const terrainMsg = mdt
-          ? `MDT05: ${mdtIndex.tiles.length} teselas en memoria, radio ${TILE_RADIUS_M / 1000} km, error de proyección ~${projErr.toFixed(1)} m`
+          ? `MDT05: ${mdtIndex.tiles.length} teselas en memoria, radio ${TILE_RADIUS_M / 1000} km, marco UTM 30N`
           : "terreno plano";
         statusEl.textContent =
           `Cargado: ${data.roads.length} tramos, ${mapBarriers.length} barreras, ${mapWater.length} cursos de agua, ${terrainMsg}`;

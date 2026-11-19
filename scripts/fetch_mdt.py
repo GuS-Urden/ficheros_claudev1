@@ -25,7 +25,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fetch_osm import ORIGIN_LAT, ORIGIN_LON, M_PER_DEG_LAT, M_PER_DEG_LON  # noqa: E402
+from fetch_osm import ORIGIN_E, ORIGIN_N  # noqa: E402
 from utm30n import latlon_to_utm30n  # noqa: E402
 
 API = "https://api-coverages.idee.es"
@@ -45,10 +45,8 @@ MAX_WAIT_S = 900        # si el servidor pide esperar más, se detiene y guarda 
 
 
 def local_to_utm(x, z):
-    """Coordenadas locales de fetch_osm.py -> UTM 30N (pasa por lat/lon)."""
-    lat = ORIGIN_LAT - z / M_PER_DEG_LAT
-    lon = ORIGIN_LON + x / M_PER_DEG_LON
-    return latlon_to_utm30n(lat, lon)
+    """Coordenadas locales (UTM relativas al origen) -> UTM 30N. Es una traslación."""
+    return x + ORIGIN_E, ORIGIN_N - z
 
 
 def polyline_utm(points):
