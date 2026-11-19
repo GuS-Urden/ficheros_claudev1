@@ -51,6 +51,9 @@
     const WATER_W = 25;             // TODO: usar la etiqueta width de OSM cuando exista
     const WATER_LIFT = 0.15;        // el agua se apoya sobre el terreno (sin cauce tallado)
     const SNAP_M = 15;              // radio de búsqueda para la altura del coche sobre la calzada
+    const TILE_RADIUS_M = 3000;     // radio de carga de mallas alrededor del coche
+    const TILE_UNLOAD_M = 3600;     // a partir de esta distancia se libera la malla (histéresis)
+    const BUILD_PER_FRAME = 2;      // mallas nuevas por fotograma, para no bloquear el dibujado
     const SKIRT_M = 15;             // profundidad de los faldones que tapan grietas entre niveles
     const CATMULL_SAMPLES = 2;      // muestras por tramo de 10 m tras Catmull-Rom
 
@@ -218,17 +221,54 @@
       return new THREE.Mesh(g, groundMat);
     }
 
-    let vertexCount = 0;
+    // ---------- Carga bajo demanda de mallas ----------
+    // Todas las teselas quedan en memoria (para las alturas), pero solo se crea la malla
+    // de las que están dentro de TILE_RADIUS_M del coche.
+    const meshes = new Map();   // clave -> malla visible
+    let detailSet = null;       // teselas de detalle existentes, para omitir celdas de la base
 
-    function buildMDTMeshes() {
-      const dT = mdtIndex.levels.detail.tile_m;
-      const detailSet = new Set();
+    function buildDetailSet() {
+      detailSet = new Set();
       for (const t of mdt.values()) if (t.level === "detail") detailSet.add(`${t.x0}_${t.y0}`);
-      const hasDetailAt = (e, n) =>
-        detailSet.has(`${Math.floor(e / dT) * dT}_${Math.floor(n / dT) * dT}`);
-      for (const t of mdt.values()) {
+    }
+
+    function hasDetailAt(e, n) {
+      const dT = mdtIndex.levels.detail.tile_m;
+      return detailSet.has(`${Math.floor(e / dT) * dT}_${Math.floor(n / dT) * dT}`);
+    }
+
+    // Distancia en metros desde un punto UTM al rectángulo de una tesela
+    function tileDistance(t, e, n) {
+      const dx = Math.max(t.x0 - e, 0, e - (t.x0 + t.tile_m));
+      const dy = Math.max(t.y0 - n, 0, n - (t.y0 + t.tile_m));
+      return Math.hypot(dx, dy);
+    }
+
+    function updateStreaming() {
+      if (!mdt) return;
+      const [e, n] = utmOf(car.position.x, car.position.z);
+
+      // Liberar las mallas lejanas
+      for (const [key, mesh] of meshes) {
+        if (tileDistance(mdt.get(key), e, n) > TILE_UNLOAD_M) {
+          scene.remove(mesh);
+          mesh.geometry.dispose();
+          meshes.delete(key);
+        }
+      }
+
+      // Crear las mallas cercanas, primero las más próximas
+      const wanted = [];
+      for (const [key, t] of mdt) {
+        if (meshes.has(key)) continue;
+        const d = tileDistance(t, e, n);
+        if (d <= TILE_RADIUS_M) wanted.push([d, key]);
+      }
+      wanted.sort((x, y) => x[0] - y[0]);
+      for (const [, key] of wanted.slice(0, BUILD_PER_FRAME)) {
+        const t = mdt.get(key);
         const mesh = buildTileMesh(t, t.level === "base" ? hasDetailAt : null);
-        vertexCount += mesh.geometry.attributes.position.count;
+        meshes.set(key, mesh);
         scene.add(mesh);
       }
     }
@@ -643,8 +683,7 @@
             mdt = null;
           }
         }
-        const t0 = performance.now();
-        if (mdt) buildMDTMeshes(); else buildFlatGround();
+        if (mdt) buildDetailSet(); else buildFlatGround();
 
         build(data);
         mapRoads = data.roads;
@@ -660,7 +699,7 @@
         }
 
         const terrainMsg = mdt
-          ? `MDT05: ${mdtIndex.tiles.length} teselas, ${vertexCount} vértices, malla ${(performance.now() - t0).toFixed(0)} ms, error de proyección ~${projErr.toFixed(1)} m`
+          ? `MDT05: ${mdtIndex.tiles.length} teselas en memoria, radio ${TILE_RADIUS_M / 1000} km, error de proyección ~${projErr.toFixed(1)} m`
           : "terreno plano";
         statusEl.textContent =
           `Cargado: ${data.roads.length} tramos, ${mapBarriers.length} barreras, ${mapWater.length} cursos de agua, ${terrainMsg}`;
@@ -675,6 +714,7 @@
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       update(dt);
+      updateStreaming();
       renderer.render(scene, camera);
       drawMinimap();
       requestAnimationFrame(loop);
