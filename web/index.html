@@ -37,6 +37,7 @@
     const VMAX_KMH = Number(params.get("vmax")) || 230;
     const MAX_SPEED = VMAX_KMH / 3.6;          // m/s
     const MM_SIDE = params.get("minimap") === "left" ? "left" : "right";
+    const FOG_ON = params.get("fog") !== "0";   // ?fog=0 desactiva la niebla (diagnóstico)
 
     const LANE_W = 3.5;       // ancho de carril (m)
     const LINE_W = 0.15;      // grosor de las marcas (m)
@@ -65,7 +66,7 @@
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x9fc3e0);
-    scene.fog = new THREE.Fog(0x9fc3e0, 600, 3000);
+    if (FOG_ON) scene.fog = new THREE.Fog(0x9fc3e0, 600, 3000);
 
     const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 5000);
 
@@ -215,6 +216,8 @@
       return new THREE.Mesh(g, groundMat);
     }
 
+    let vertexCount = 0;
+
     function buildMDTMeshes() {
       const dT = mdtIndex.levels.detail.tile_m;
       const detailSet = new Set();
@@ -222,7 +225,9 @@
       const hasDetailAt = (e, n) =>
         detailSet.has(`${Math.floor(e / dT) * dT}_${Math.floor(n / dT) * dT}`);
       for (const t of mdt.values()) {
-        scene.add(buildTileMesh(t, t.level === "base" ? hasDetailAt : null));
+        const mesh = buildTileMesh(t, t.level === "base" ? hasDetailAt : null);
+        vertexCount += mesh.geometry.attributes.position.count;
+        scene.add(mesh);
       }
     }
 
@@ -523,7 +528,7 @@
       camera.position.lerp(desired, Math.min(1, dt * 6));
       camera.lookAt(car.position.x, car.position.y + 1.2, car.position.z);
 
-      speedEl.textContent = `${Math.round(Math.abs(speed) * 3.6)} km/h (máx. ${VMAX_KMH})`;
+      speedEl.textContent = `${Math.round(Math.abs(speed) * 3.6)} km/h (máx. ${VMAX_KMH}) · x ${car.position.x.toFixed(0)} z ${car.position.z.toFixed(0)} y ${car.position.y.toFixed(1)}`;
     }
 
     // ---------- Minimapa ----------
@@ -636,6 +641,7 @@
             mdt = null;
           }
         }
+        const t0 = performance.now();
         if (mdt) buildMDTMeshes(); else buildFlatGround();
 
         build(data);
@@ -652,7 +658,7 @@
         }
 
         const terrainMsg = mdt
-          ? `MDT05: ${mdtIndex.tiles.length} teselas (error de proyección ~${projErr.toFixed(1)} m)`
+          ? `MDT05: ${mdtIndex.tiles.length} teselas, ${vertexCount} vértices, malla ${(performance.now() - t0).toFixed(0)} ms, error de proyección ~${projErr.toFixed(1)} m`
           : "terreno plano";
         statusEl.textContent =
           `Cargado: ${data.roads.length} tramos, ${mapBarriers.length} barreras, ${mapWater.length} cursos de agua, ${terrainMsg}`;
