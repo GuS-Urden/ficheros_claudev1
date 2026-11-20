@@ -27,7 +27,8 @@ def main():
     print(f"Vías totales: {len(roads)}\n")
 
     for ref in REFS:
-        hits = [r for r in roads if ref in r.get("ref", "")]
+        # Coincidencia exacta por token: "V-30" no debe casar con "CV-300" ni con "V-301"
+        hits = [r for r in roads if ref in [t.strip() for t in r.get("ref", "").split(";")]]
         print(f"=== {ref}: {len(hits)} vías ===")
         if not hits:
             print("  (ninguna; revisa si la referencia en OSM es distinta)\n")
@@ -35,11 +36,11 @@ def main():
         bridges = sum(1 for r in hits if r.get("bridge", "no") != "no")
         total_km = sum(length(r["points"]) for r in hits) / 1000
         print(f"  puentes: {bridges} | longitud total: {total_km:.1f} km")
-        print(f"{'id':>12} {'lanes':>5} {'oneway':>6} {'bridge':>8} {'layer':>5} {'long_m':>8}  name")
+        print(f"{'id':>12} {'lanes':>5} {'oneway':>6} {'bridge':>8} {'layer':>5} {'long_m':>8}  {'ref':<14} name")
         ordered = sorted(hits, key=lambda r: -length(r["points"]))
         for r in ordered[:MAX_ROWS]:
             print(f"{r['id']:>12} {r['lanes']:>5} {str(r['oneway']):>6} {r.get('bridge', 'no'):>8} "
-                  f"{r.get('layer', '0'):>5} {length(r['points']):>8.0f}  {r.get('name', '')}")
+                  f"{r.get('layer', '0'):>5} {length(r['points']):>8.0f}  {r.get('ref', ''):<14} {r.get('name', '')}")
         if len(ordered) > MAX_ROWS:
             print(f"  ... {len(ordered) - MAX_ROWS} vías más (las más cortas)")
         print()
