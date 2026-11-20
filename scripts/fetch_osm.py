@@ -46,9 +46,10 @@ BARRIER_TYPES = "jersey|concrete|wall|retaining_wall|guard_rail"
 QUERY = f"""
 [out:json][timeout:120];
 (
-  way["ref"~"V-(30|31|15)"]({BBOX});
+  way["ref"~"V-(30|31|15)|CV-500"]({BBOX});
   way["barrier"~"^({BARRIER_TYPES})$"]({BBOX});
   way["waterway"~"^(river|canal)$"]({BBOX});
+  way["natural"="water"]["water"="river"]({BBOX});
 );
 out geom tags;
 """
@@ -116,13 +117,25 @@ def parse_lanes(tags):
 
 
 def convert(raw):
-    roads, barriers, water = [], [], []
+    roads, barriers, water, river_areas = [], [], [], []
     for el in raw.get("elements", []):
         if el.get("type") != "way" or "geometry" not in el:
             continue
         tags = el.get("tags", {})
         points = [to_local(g["lat"], g["lon"]) for g in el["geometry"]]
         if len(points) < 2:
+            continue
+
+        # Cauces como superficie (polígono cerrado): se usan para hundir el terreno
+        if tags.get("natural") == "water" and tags.get("water") == "river":
+            g = el["geometry"]
+            if len(g) >= 4 and g[0]["lat"] == g[-1]["lat"] and g[0]["lon"] == g[-1]["lon"]:
+                river_areas.append({
+                    "id": el["id"],
+                    "name": tags.get("name", ""),
+                    "intermittent": tags.get("intermittent", "no"),
+                    "points": points[:-1],
+                })
             continue
 
         if "highway" in tags and "ref" in tags:
@@ -142,13 +155,13 @@ def convert(raw):
             barriers.append({"id": el["id"], "type": tags["barrier"], "points": points})
         elif "waterway" in tags:
             water.append({"id": el["id"], "name": tags.get("name", ""), "points": points})
-    return roads, barriers, water
+    return roads, barriers, water, river_areas
 
 
 def main():
     print("Consultando Overpass API…")
     raw = fetch_overpass()
-    roads, barriers, water = convert(raw)
+    roads, barriers, water, river_areas = convert(raw)
 
     ub = utm_bbox()
     out = Path(__file__).resolve().parent.parent / "data" / "roads.json"
@@ -165,12 +178,14 @@ def main():
                 "roads": roads,
                 "barriers": barriers,
                 "water": water,
+                "river_areas": river_areas,
             },
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
-    print(f"{len(roads)} tramos, {len(barriers)} barreras, {len(water)} cursos de agua -> {out}")
+    print(f"{len(roads)} tramos, {len(barriers)} barreras, {len(water)} cursos de agua, "
+          f"{len(river_areas)} áreas de río -> {out}")
 
 
 if __name__ == "__main__":

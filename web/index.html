@@ -54,6 +54,8 @@
     const TILE_RADIUS_M = 3000;     // radio de carga de mallas alrededor del coche
     const TILE_UNLOAD_M = 3600;     // a partir de esta distancia se libera la malla (histéresis)
     const BUILD_PER_FRAME = 2;      // mallas nuevas por fotograma, para no bloquear el dibujado
+    const CHANNEL_DEPTH_M = 5;      // profundidad del cauce respecto al terreno de las orillas
+    const CHANNEL_SURFACE_LIFT = 0.2; // la superficie del agua/arena queda 20 cm por encima del fondo
     const SKIRT_M = 15;             // profundidad de los faldones que tapan grietas entre niveles
     const CATMULL_SAMPLES = 2;      // muestras por tramo de 10 m tras Catmull-Rom
 
@@ -127,7 +129,7 @@
     }
 
     // Altura del terreno en (x, z): detalle 5 m si existe, si no base 25 m
-    function terrainAt(x, z) {
+    function baseTerrainAt(x, z) {
       if (!mdt) return 0;
       const [e, n] = utmOf(x, z);
       const dT = mdtIndex.levels.detail.tile_m, bT = mdtIndex.levels.base.tile_m;
@@ -136,6 +138,63 @@
       const b = mdt.get(`base_${Math.floor(e / bT) * bT}_${Math.floor(n / bT) * bT}`);
       if (b) return sampleTile(b, e, n);
       return 0;
+    }
+
+    // ---------- Cauces hundidos ----------
+    // Polígonos de río (roads.json: river_areas). Dentro, el terreno baja CHANNEL_DEPTH_M.
+    let riverAreas = [];
+
+    function setupRiverAreas(list) {
+      riverAreas = (list ?? []).map(a => {
+        const xs = a.points.map(p => p[0]), zs = a.points.map(p => p[1]);
+        return { ...a, bbox: [Math.min(...xs), Math.min(...zs), Math.max(...xs), Math.max(...zs)] };
+      });
+    }
+
+    // Ray casting: punto dentro de un polígono [x, z][]
+    function insidePolygon(x, z, pts) {
+      let inside = false;
+      for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+        const [xi, zi] = pts[i], [xj, zj] = pts[j];
+        if ((zi > z) !== (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi) inside = !inside;
+      }
+      return inside;
+    }
+
+    function channelAt(x, z) {
+      for (const a of riverAreas) {
+        if (x < a.bbox[0] || x > a.bbox[2] || z < a.bbox[1] || z > a.bbox[3]) continue;
+        if (insidePolygon(x, z, a.points)) return CHANNEL_DEPTH_M;
+      }
+      return 0;
+    }
+
+    // Altura final del terreno: MDT menos el hundimiento del cauce.
+    // Calzadas, barreras, agua y coche usan esta función.
+    function terrainAt(x, z) {
+      return baseTerrainAt(x, z) - channelAt(x, z);
+    }
+
+    const riverMats = {
+      water: new THREE.MeshBasicMaterial({ color: 0x2f7fc1, side: THREE.DoubleSide }),
+      dry: new THREE.MeshLambertMaterial({ color: 0xc2b280, side: THREE.DoubleSide }),
+    };
+
+    // Superficie plana en el fondo de cada cauce: agua (intermittent=no) o arena (intermittent=yes)
+    function buildRiverSurfaces() {
+      for (const a of riverAreas) {
+        const contour = a.points.map(([x, z]) => new THREE.Vector2(x, z));
+        const edge = a.points.map(([x, z]) => baseTerrainAt(x, z)).sort((p, q) => p - q);
+        const y = edge[Math.floor(edge.length / 2)] - CHANNEL_DEPTH_M + CHANNEL_SURFACE_LIFT;
+        const faces = THREE.ShapeUtils.triangulateShape(contour, []);
+        const pos = [];
+        for (const [x, z] of a.points) pos.push(x, y, z);
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+        g.setIndex(faces.flat());
+        g.computeVertexNormals();
+        scene.add(new THREE.Mesh(g, a.intermittent === "yes" ? riverMats.dry : riverMats.water));
+      }
     }
 
     // Malla de una tesela con faldones. `skip(e, n)` omite celdas (se usa en la base
@@ -148,7 +207,7 @@
       for (let j = 0; j < ny; j++) {
         for (let i = 0; i < nx; i++) {
           const [x, z] = localOf(x0 + i * step, top - j * step);
-          pos.push(x, h[j * nx + i], z);
+          pos.push(x, h[j * nx + i] - channelAt(x, z), z);
         }
       }
       const idx = [];
@@ -592,6 +651,13 @@
         mctx.lineWidth = r.lanes * LANE_W;
         strokePath(r.points);
       }
+      for (const a of riverAreas) {
+        mctx.fillStyle = a.intermittent === "yes" ? "rgba(194,178,128,0.85)" : "rgba(40,120,210,0.85)";
+        mctx.beginPath();
+        a.points.forEach(([x, z], i) => (i ? mctx.lineTo(x, z) : mctx.moveTo(x, z)));
+        mctx.closePath();
+        mctx.fill();
+      }
       mctx.strokeStyle = "rgba(255,60,60,0.9)";
       mctx.lineWidth = px(1.5);
       for (const r of mapRoads) strokePath(r.points);
@@ -649,7 +715,9 @@
         }
         if (mdt) buildDetailSet(); else buildFlatGround();
 
+        setupRiverAreas(data.river_areas);
         build(data);
+        buildRiverSurfaces();
         mapRoads = data.roads;
         mapWater = data.water ?? [];
         mapBarriers = data.barriers ?? [];

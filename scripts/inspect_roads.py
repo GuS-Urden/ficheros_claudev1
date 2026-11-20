@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_ROWS = 15   # filas por referencia; el resto se resume
-REFS = sys.argv[1:] or ["V-30", "V-31", "V-15"]
+REFS = sys.argv[1:] or ["V-30", "V-31", "V-15", "CV-500"]
 
 
 def length(points):
