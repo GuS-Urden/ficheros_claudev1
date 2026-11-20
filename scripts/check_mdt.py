@@ -8,10 +8,12 @@ Uso (raíz del proyecto):
 """
 import array
 import json
+import math
 import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+RADIUS_M = 3000   # solo se analizan cauces y calzadas a menos de este radio del origen (centro de Valencia)
 DATA = ROOT / "data"
 
 
@@ -73,23 +75,30 @@ def main():
     names = sorted({w.get("name", "") for w in water if w.get("name")})
     print("Nombres de cauces (primeros 15):", ", ".join(names[:15]))
 
+    def near(p):
+        return math.hypot(p[0], p[1]) <= RADIUS_M
+
     for label, group in (("Turia", turia), ("Todos los cauces", water)):
         vals, levels = [], {"detail": 0, "base": 0, "sin datos": 0}
         for w in group:
             for p in w["points"]:
+                if not near(p):
+                    continue
                 h, lv = sample(index, tiles, *to_utm(p))
                 if h is None:
                     levels["sin datos"] += 1
                 else:
                     vals.append(h)
                     levels[lv] += 1
-        stats(f"Altura MDT en {label}", vals)
+        stats(f"Altura MDT en {label} (a menos de {RADIUS_M / 1000:.0f} km del origen)", vals)
         print(f"  origen de las muestras: {levels}")
 
     # Calzadas, para comparar: rango de alturas en las calzadas
     road_vals = []
-    for r in roads["roads"][:2000]:
+    for r in roads["roads"]:
         for p in r["points"][::5]:
+            if not near(p):
+                continue
             h, _ = sample(index, tiles, *to_utm(p))
             if h is not None:
                 road_vals.append(h)
