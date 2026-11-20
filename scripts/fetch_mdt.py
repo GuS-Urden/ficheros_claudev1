@@ -175,7 +175,13 @@ def fill_nulls(flat, nx, ny):
 def load_index():
     path = OUT / "index.json"
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
+        index = json.loads(path.read_text(encoding="utf-8"))
+        if index.get("levels") != LEVELS:
+            raise SystemExit(
+                "La configuración de niveles cambió respecto a la descarga anterior. "
+                "Borra la carpeta data\\mdt y vuelve a ejecutar el script para no mezclar teselas de distinto tamaño."
+            )
+        return index
     return {"crs": "EPSG:25830", "byte_order": "little-endian float32",
             "row_order": "north_to_south", "levels": LEVELS, "tiles": []}
 

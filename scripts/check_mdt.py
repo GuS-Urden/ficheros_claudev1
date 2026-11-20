@@ -8,6 +8,7 @@ Uso (raíz del proyecto):
 """
 import array
 import json
+import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -63,8 +64,14 @@ def main():
 
     # Turia (por nombre) y, si no hay, todos los cursos de agua
     water = roads.get("water", [])
-    turia = [w for w in water if "turia" in w.get("name", "").lower()]
-    print(f"Cursos de agua: {len(water)} | con 'Turia' en el nombre: {len(turia)}")
+    def norm(name):
+        decomposed = unicodedata.normalize("NFKD", name.lower())
+        return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+    turia = [w for w in water if "tur" in norm(w.get("name", ""))]
+    print(f"Cursos de agua: {len(water)} | con 'tur' en el nombre (Turia/Túria): {len(turia)}")
+    names = sorted({w.get("name", "") for w in water if w.get("name")})
+    print("Nombres de cauces (primeros 15):", ", ".join(names[:15]))
 
     for label, group in (("Turia", turia), ("Todos los cauces", water)):
         vals, levels = [], {"detail": 0, "base": 0, "sin datos": 0}
