@@ -15,6 +15,7 @@ Uso (desde la raíz del proyecto):
 Datos de OpenStreetMap: © colaboradores de OpenStreetMap, licencia ODbL.
 """
 import json
+import math
 import sys
 import time
 import urllib.error
@@ -40,6 +41,8 @@ ORIGIN_LAT, ORIGIN_LON = 39.47, -0.38
 ORIGIN_E, ORIGIN_N = latlon_to_utm30n(ORIGIN_LAT, ORIGIN_LON)
 
 UTM_PAD_M = 1000  # margen alrededor del área para ortofoto y terreno
+LINK_SNAP_M = 20  # un ramal se incluye si uno de sus extremos está a menos de esta distancia de una vía seleccionada
+GRID_CELL_M = 50  # tamaño de celda para la búsqueda de proximidad
 
 BARRIER_TYPES = "jersey|concrete|wall|retaining_wall|guard_rail"
 
@@ -50,6 +53,7 @@ QUERY = f"""
   way["barrier"~"^({BARRIER_TYPES})$"]({BBOX});
   way["waterway"~"^(river|canal)$"]({BBOX});
   way["natural"="water"]["water"="river"]({BBOX});
+  way["highway"~"_link$"]({BBOX});
 );
 out geom tags;
 """
@@ -117,7 +121,7 @@ def parse_lanes(tags):
 
 
 def convert(raw):
-    roads, barriers, water, river_areas = [], [], [], []
+    roads, barriers, water, river_areas, links = [], [], [], [], []
     for el in raw.get("elements", []):
         if el.get("type") != "way" or "geometry" not in el:
             continue
@@ -138,6 +142,23 @@ def convert(raw):
                 })
             continue
 
+        # Ramales (*_link) sin referencia: se filtran por proximidad después
+        if tags.get("highway", "").endswith("_link") and "ref" not in tags:
+            links.append({
+                "id": el["id"],
+                "ref": "",
+                "name": tags.get("name", ""),
+                "highway": tags["highway"],
+                "lanes": parse_lanes(tags),
+                "oneway": tags.get("oneway") in ("yes", "true", "1"),
+                "maxspeed": tags.get("maxspeed", ""),
+                "layer": tags.get("layer", "0"),
+                "bridge": tags.get("bridge", "no"),
+                "link": True,
+                "points": points,
+            })
+            continue
+
         if "highway" in tags and "ref" in tags:
             roads.append({
                 "id": el["id"],
@@ -155,13 +176,40 @@ def convert(raw):
             barriers.append({"id": el["id"], "type": tags["barrier"], "points": points})
         elif "waterway" in tags:
             water.append({"id": el["id"], "name": tags.get("name", ""), "points": points})
-    return roads, barriers, water, river_areas
+    return roads, barriers, water, river_areas, links
+
+
+def select_links(roads, links):
+    """Devuelve los ramales con un extremo a menos de LINK_SNAP_M de una vía seleccionada."""
+    grid = {}
+    for r in roads:
+        pts = r["points"]
+        for a, b in zip(pts, pts[1:]):
+            n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) // 10))
+            for k in range(n + 1):
+                t = k / n
+                x = a[0] + (b[0] - a[0]) * t
+                z = a[1] + (b[1] - a[1]) * t
+                grid.setdefault((math.floor(x / GRID_CELL_M), math.floor(z / GRID_CELL_M)), []).append((x, z))
+
+    def near_selected(p):
+        cx, cz = math.floor(p[0] / GRID_CELL_M), math.floor(p[1] / GRID_CELL_M)
+        for dx in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                for x, z in grid.get((cx + dx, cz + dz), ()):
+                    if math.hypot(x - p[0], z - p[1]) <= LINK_SNAP_M:
+                        return True
+        return False
+
+    return [l for l in links if near_selected(l["points"][0]) or near_selected(l["points"][-1])]
 
 
 def main():
     print("Consultando Overpass API…")
     raw = fetch_overpass()
-    roads, barriers, water, river_areas = convert(raw)
+    roads, barriers, water, river_areas, links = convert(raw)
+    kept_links = select_links(roads, links)
+    roads.extend(kept_links)
 
     ub = utm_bbox()
     out = Path(__file__).resolve().parent.parent / "data" / "roads.json"
@@ -184,7 +232,7 @@ def main():
         ),
         encoding="utf-8",
     )
-    print(f"{len(roads)} tramos, {len(barriers)} barreras, {len(water)} cursos de agua, "
+    print(f"{len(roads)} tramos ({len(kept_links)} ramales de {len(links)} candidatos), {len(barriers)} barreras, {len(water)} cursos de agua, "
           f"{len(river_areas)} áreas de río -> {out}")
 
 
