@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+MAX_ROWS = 15   # filas por referencia; el resto se resume
 REFS = sys.argv[1:] or ["V-30", "V-31", "V-15"]
 
 
@@ -28,10 +29,19 @@ def main():
     for ref in REFS:
         hits = [r for r in roads if ref in r.get("ref", "")]
         print(f"=== {ref}: {len(hits)} vías ===")
+        if not hits:
+            print("  (ninguna; revisa si la referencia en OSM es distinta)\n")
+            continue
+        bridges = sum(1 for r in hits if r.get("bridge", "no") != "no")
+        total_km = sum(length(r["points"]) for r in hits) / 1000
+        print(f"  puentes: {bridges} | longitud total: {total_km:.1f} km")
         print(f"{'id':>12} {'lanes':>5} {'oneway':>6} {'bridge':>8} {'layer':>5} {'long_m':>8}  name")
-        for r in sorted(hits, key=lambda r: -length(r["points"])):
+        ordered = sorted(hits, key=lambda r: -length(r["points"]))
+        for r in ordered[:MAX_ROWS]:
             print(f"{r['id']:>12} {r['lanes']:>5} {str(r['oneway']):>6} {r.get('bridge', 'no'):>8} "
                   f"{r.get('layer', '0'):>5} {length(r['points']):>8.0f}  {r.get('name', '')}")
+        if len(ordered) > MAX_ROWS:
+            print(f"  ... {len(ordered) - MAX_ROWS} vías más (las más cortas)")
         print()
 
     # Enlaces (ramales de entrada y salida): suelen no llevar ref, por eso no entran en la consulta
